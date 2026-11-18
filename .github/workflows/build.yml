@@ -1,0 +1,127 @@
+name: Build
+
+# Once a day: if Alacritty has a new release, or the background-image branch
+# has changed since the last build, put the branch on top of the newest
+# release, build it on Windows and publish it as a release of this fork.
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if nothing changed
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  UPSTREAM: https://github.com/alacritty/alacritty.git
+  BRANCH: background-image
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.look.outputs.tag }}
+      patch: ${{ steps.look.outputs.patch }}
+      build: ${{ steps.look.outputs.build }}
+    steps:
+      - name: Keep the daily schedule switched on
+        # GitHub turns schedules off in repos that look idle for 60 days.
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/enable"
+
+      - name: Look for a new release or a changed branch
+        id: look
+        run: |
+          tag=$(git ls-remote --tags --refs "$UPSTREAM" 'v*' \
+            | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -n 1)
+          patch=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/heads/$BRANCH" | cut -f1)
+          echo "Newest Alacritty release: $tag"
+          echo "$BRANCH is at: $patch"
+
+          notes=$(gh release view "$tag-bg" -R "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || true)
+          if [ "${{ inputs.force }}" = "true" ] || ! grep -q "$patch" <<< "$notes"; then
+            build=true
+          else
+            build=false
+            echo "$tag-bg was already built from this branch, nothing to do."
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "patch=$patch" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      PATCH: ${{ needs.check.outputs.patch }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.patch }}
+          fetch-depth: 0
+
+      - name: Move our change onto the newest release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet --tags "$UPSTREAM"
+
+          # The branch is our commits on top of some release; find which one.
+          # Skip our own -bg tags and release candidates.
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' HEAD)
+          echo "The branch sits on $base, building on $TAG."
+          if ! git rebase --onto "$TAG" "$base"; then
+            git rebase --abort
+            echo "::error::The background-image change no longer applies cleanly to $TAG. Rebase the branch by hand onto $TAG and push it."
+            exit 1
+          fi
+          git log --oneline -n 3
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Make the installer
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
+          wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
+            -out "Alacritty-$TAG-bg-installer.msi" "alacritty/windows/wix/alacritty.wxs"
+          cp target/release/alacritty.exe "Alacritty-$TAG-bg-portable.exe"
+
+      - name: Publish the release
+        run: |
+          release="$TAG-bg"
+          gh release delete "$release" -y --cleanup-tag 2>/dev/null || true
+          git tag -f "$release"
+          git push -f origin "refs/tags/$release"
+
+          cat > notes.md <<EOF
+          Alacritty $TAG with \`window.background_image\`.
+
+          Built from \`$BRANCH\` at $PATCH, moved onto $TAG.
+          EOF
+
+          gh release create "$release" \
+            --title "Alacritty $TAG with background images" \
+            --notes-file notes.md \
+            "Alacritty-$TAG-bg-installer.msi" \
+            "Alacritty-$TAG-bg-portable.exe"
