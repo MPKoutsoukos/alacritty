@@ -836,6 +836,7 @@ impl Display {
         self.make_current();
 
         self.renderer.clear(background_color, config.window_opacity());
+        self.renderer.draw_background_image(&size_info, &config.window.background_image);
         let mut lines = RenderLines::new();
 
         // Optimize loop hint comparator.

@@ -1,4 +1,5 @@
 use std::fmt::{self, Formatter};
+use std::path::PathBuf;
 
 use log::{error, warn};
 use serde::de::{self, MapAccess, Visitor};
@@ -65,6 +66,54 @@ pub struct WindowConfig {
 
     /// Window level.
     pub level: WindowLevel,
+
+    /// Image drawn behind the terminal text.
+    pub background_image: BackgroundImage,
+}
+
+/// `window.background_image`: a PNG drawn over the window background, under the text.
+#[derive(ConfigDeserialize, Serialize, Default, Debug, Clone, PartialEq)]
+pub struct BackgroundImage {
+    /// PNG file to show; nothing is drawn when unset.
+    pub path: Option<PathBuf>,
+
+    /// Opacity of the image, from 0.0 to 1.0.
+    pub opacity: Percentage,
+
+    /// Where the image sits in the window. It is shown at its own size, shrunk to fit if the
+    /// window is smaller.
+    pub position: ImagePosition,
+}
+
+#[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ImagePosition {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    #[default]
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl ImagePosition {
+    /// Horizontal and vertical anchor, 0.0 (left/top) to 1.0 (right/bottom).
+    pub fn anchor(self) -> (f32, f32) {
+        match self {
+            Self::TopLeft => (0., 0.),
+            Self::Top => (0.5, 0.),
+            Self::TopRight => (1., 0.),
+            Self::Left => (0., 0.5),
+            Self::Center => (0.5, 0.5),
+            Self::Right => (1., 0.5),
+            Self::BottomLeft => (0., 1.),
+            Self::Bottom => (0.5, 1.),
+            Self::BottomRight => (1., 1.),
+        }
+    }
 }
 
 impl Default for WindowConfig {
@@ -85,6 +134,7 @@ impl Default for WindowConfig {
             decorations_theme_variant: Default::default(),
             option_as_alt: Default::default(),
             level: Default::default(),
+            background_image: Default::default(),
         }
     }
 }

@@ -16,13 +16,16 @@ use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::Flags;
 
 use crate::config::debug::RendererPreference;
+use crate::config::window::BackgroundImage;
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
+use crate::renderer::image::ImageRenderer;
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
 
+mod image;
 pub mod platform;
 pub mod rects;
 mod shader;
@@ -89,6 +92,7 @@ enum TextRendererProvider {
 pub struct Renderer {
     text_renderer: TextRendererProvider,
     rect_renderer: RectRenderer,
+    image_renderer: ImageRenderer,
     robustness: bool,
 }
 
@@ -150,15 +154,17 @@ impl Renderer {
             None => (shader_version.as_ref() >= "3.3" && !is_gles_context, true),
         };
 
-        let (text_renderer, rect_renderer) = if use_glsl3 {
+        let (text_renderer, rect_renderer, image_renderer) = if use_glsl3 {
             let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
             let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
-            (text_renderer, rect_renderer)
+            let image_renderer = ImageRenderer::new(ShaderVersion::Glsl3)?;
+            (text_renderer, rect_renderer, image_renderer)
         } else {
             let text_renderer =
                 TextRendererProvider::Gles2(Gles2Renderer::new(allow_dsb, is_gles_context)?);
             let rect_renderer = RectRenderer::new(ShaderVersion::Gles2)?;
-            (text_renderer, rect_renderer)
+            let image_renderer = ImageRenderer::new(ShaderVersion::Gles2)?;
+            (text_renderer, rect_renderer, image_renderer)
         };
 
         // Enable debug logging for OpenGL as well.
@@ -171,7 +177,7 @@ impl Renderer {
             }
         }
 
-        Ok(Self { text_renderer, rect_renderer, robustness })
+        Ok(Self { text_renderer, rect_renderer, image_renderer, robustness })
     }
 
     pub fn draw_cells<I: Iterator<Item = RenderableCell>>(
@@ -260,6 +266,27 @@ impl Renderer {
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
 
             // Restore viewport with padding.
+            self.set_viewport(size_info);
+        }
+    }
+
+    /// Draw the configured background image over the cleared window, under the grid.
+    pub fn draw_background_image(&mut self, size_info: &SizeInfo, config: &BackgroundImage) {
+        if config.path.is_none() {
+            return;
+        }
+
+        unsafe {
+            // The image covers the whole window, padding included.
+            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            // Premultiplied colour over the background; keep the window's own alpha (opacity).
+            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ZERO, gl::ONE);
+        }
+
+        self.image_renderer.draw(size_info, config);
+
+        unsafe {
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
             self.set_viewport(size_info);
         }
     }
